@@ -2101,6 +2101,7 @@ dependencies = [
  "chrono",
  "csv",
  "env_logger",
+ "futures 0.3.8",
  "graphql_client",
  "log",
  "reqwest",

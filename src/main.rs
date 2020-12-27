@@ -1,6 +1,8 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use chrono::{Date, Duration, TimeZone, Utc};
 use csv::WriterBuilder;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use graphql_client::{GraphQLQuery, Response};
 use log::{error, info};
 use rust_decimal::prelude::*;
@@ -8,7 +10,7 @@ use serde::Serialize;
 use std::fs;
 use web3::types::Address;
 
-const ENDPOINT: &'static str = "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v2";
+const ENDPOINT: &str = "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v2";
 
 type BigInt = Decimal;
 type BigDecimal = Decimal;
@@ -61,10 +63,6 @@ impl FlatRecord {
     }
 }
 
-pub fn timestamp_of(date: Date<Utc>) -> i64 {
-    date.and_hms(0, 0, 0).timestamp()
-}
-
 pub async fn swaps(
     skip: i64,
     timestamp_gte: Option<BigInt>,
@@ -104,6 +102,10 @@ async fn save_results(date: Date<Utc>, results: Vec<swaps::SwapsSwaps>) -> Resul
     Ok(())
 }
 
+pub fn timestamp_of(date: Date<Utc>) -> i64 {
+    date.and_hms(0, 0, 0).timestamp()
+}
+
 async fn fetch_day(date: Date<Utc>) -> Result<()> {
     let start_time = timestamp_of(date);
     let end_time = timestamp_of(date + Duration::days(1));
@@ -117,19 +119,20 @@ async fn fetch_day(date: Date<Utc>) -> Result<()> {
 
         while retries < 10 {
             if let Ok(resp) = swaps(skip, Some(start_time.into()), Some(end_time.into())).await {
-                let payload = resp.data.ok_or_else(|| anyhow!("No data"))?;
-                let num_results = payload.swaps.len();
-                results.extend(payload.swaps);
+                if let Some(payload) = resp.data {
+                    let num_results = payload.swaps.len();
+                    results.extend(payload.swaps);
 
-                if num_results >= 100 {
-                    info!("Fetched >= 100 results, trying next page");
-                    skip += num_results as i64;
-                } else {
-                    info!("Fetched {} for {}", results.len(), date,);
-                    running = false;
-                }
+                    if num_results >= 100 {
+                        info!("{}: fetched >= 100 results, page {}", date, skip / 100);
+                        skip += num_results as i64;
+                    } else {
+                        info!("Fetched {} for {}", results.len(), date,);
+                        running = false;
+                    }
 
-                break;
+                    break;
+                };
             } else {
                 error!("Error fetching.. retry {}/10", retries);
                 retries += 1;
@@ -142,24 +145,34 @@ async fn fetch_day(date: Date<Utc>) -> Result<()> {
     Ok(())
 }
 
+async fn ensure_exists(date: Date<Utc>) -> Result<()> {
+    if std::path::Path::new(&get_filename_for(date)).exists() {
+        info!("Data already exists for {}", date);
+        Ok(())
+    } else {
+        fetch_day(date).await
+    }
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
 
-    let start_date = Utc.ymd(2020, 5, 17);
+    let mut date = Utc.ymd(2020, 5, 17);
     let end_date = Utc::now().date();
 
-    let mut dt = start_date;
-    while dt <= end_date {
-        if std::path::Path::new(&get_filename_for(dt)).exists() {
-            info!("Data already exists for {}", dt);
-        } else {
-            if let Ok(_) = fetch_day(dt).await {
-                info!("Fetched for {}", dt);
-            } else {
-                error!("Error fetching {}", dt);
-            }
+    let mut workers = FuturesUnordered::new();
+
+    while workers.len() < 5 {
+        workers.push(ensure_exists(date));
+        date = date.succ();
+    }
+
+    while workers.next().await.is_some() {
+        info!("Worker finished");
+        if date <= end_date {
+            workers.push(ensure_exists(date));
+            date = date.succ();
         }
-        dt = dt.succ()
     }
 }
