@@ -1,0 +1,22 @@
+query Swaps ($skip: Int, $start: BigInt, $end: BigInt) {
+ swaps(skip: $skip, where: {timestamp_gte: $start, timestamp_lt: $end} ) {
+   id,
+   to,
+   sender,
+   logIndex,
+   timestamp,
+   amount0In,
+   amount1In,
+   amount0Out,
+   amount1Out,
+   amountUSD,
+   transaction {
+      id,
+      blockNumber,
+   },
+   pair {
+      token0 { id },
+      token1 { id },
+   },
+ }
+}
