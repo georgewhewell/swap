@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{Date, Duration, TimeZone, Utc};
 use csv::WriterBuilder;
 use futures::stream::FuturesUnordered;
@@ -64,12 +64,12 @@ impl FlatRecord {
 }
 
 pub async fn swaps(
-    skip: i64,
+    id_gt: String,
     timestamp_gte: Option<BigInt>,
     timestamp_lt: Option<BigInt>,
 ) -> Result<Response<swaps::ResponseData>> {
     let q = Swaps::build_query(swaps::Variables {
-        skip: Some(skip),
+        id_gt: Some(id_gt),
         start: timestamp_gte,
         end: timestamp_lt,
     });
@@ -109,7 +109,7 @@ pub fn timestamp_of(date: Date<Utc>) -> i64 {
 async fn fetch_day(date: Date<Utc>) -> Result<()> {
     let start_time = timestamp_of(date);
     let end_time = timestamp_of(date + Duration::days(1));
-    let mut skip = 0;
+    let mut last_id = "0x0".to_string();
     let mut running = true;
 
     let mut results = vec![];
@@ -118,25 +118,41 @@ async fn fetch_day(date: Date<Utc>) -> Result<()> {
         let mut retries = 0;
 
         while retries < 10 {
-            if let Ok(resp) = swaps(skip, Some(start_time.into()), Some(end_time.into())).await {
+            if let Ok(resp) = swaps(
+                last_id.clone(),
+                Some(start_time.into()),
+                Some(end_time.into()),
+            )
+            .await
+            {
                 if let Some(payload) = resp.data {
                     let num_results = payload.swaps.len();
                     results.extend(payload.swaps);
+                    retries = 0;
 
                     if num_results >= 100 {
-                        info!("{}: fetched >= 100 results, page {}", date, skip / 100);
-                        skip += num_results as i64;
+                        info!("{}: fetched >= 100 results, from {}", date, last_id);
+                        // skip += num_results as i64;
+                        last_id = results.last().unwrap().id.clone();
                     } else {
                         info!("Fetched {} for {}", results.len(), date,);
                         running = false;
                     }
 
                     break;
+                } else {
+                    // No data..
+                    error!("{}: Error fetching..(no data) retry {}/10", date, retries);
+                    retries += 1;
                 };
             } else {
-                error!("Error fetching.. retry {}/10", retries);
+                error!("{}: Error fetching.. retry {}/10", date, retries);
                 retries += 1;
             }
+        }
+
+        if retries > 10 {
+            return Err(anyhow!("Max retries exceeded"));
         }
     }
 
@@ -148,6 +164,9 @@ async fn fetch_day(date: Date<Utc>) -> Result<()> {
 async fn ensure_exists(date: Date<Utc>) -> Result<()> {
     if std::path::Path::new(&get_filename_for(date)).exists() {
         info!("Data already exists for {}", date);
+        Ok(())
+    } else if std::path::Path::new(&format!("{}.zst", &get_filename_for(date))).exists() {
+        info!("Data already exists for {} (compressed)", date);
         Ok(())
     } else {
         fetch_day(date).await
@@ -163,16 +182,22 @@ async fn main() {
 
     let mut workers = FuturesUnordered::new();
 
-    while workers.len() < 5 {
+    while workers.len() < 20 {
         workers.push(ensure_exists(date));
         date = date.succ();
     }
 
-    while workers.next().await.is_some() {
-        info!("Worker finished");
-        if date <= end_date {
-            workers.push(ensure_exists(date));
-            date = date.succ();
-        }
+    while let Some(result) = workers.next().await {
+        match result {
+            Ok(_) => {
+                if date <= end_date {
+                    workers.push(ensure_exists(date));
+                }
+            }
+            Err(err) => {
+                error!("Worker failed 10 times: {:?}", err);
+            }
+        };
+        date = date.succ();
     }
 }

@@ -1,5 +1,5 @@
-query Swaps ($skip: Int, $start: BigInt, $end: BigInt) {
- swaps(skip: $skip, where: {timestamp_gte: $start, timestamp_lt: $end} ) {
+query Swaps ($start: BigInt, $end: BigInt, $id_gt: ID) {
+ swaps(where: {id_gt: $id_gt, timestamp_gt: $start, timestamp_lte: $end } ) {
    id,
    to,
    sender,
